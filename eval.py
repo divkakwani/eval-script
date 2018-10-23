@@ -23,7 +23,7 @@ import re
 
 # --- Config varibles ----
 
-verbose = True
+verbose = False
 gcc_flags = []
 gpp_flags = ['-std=c++14']
 
