@@ -1,14 +1,14 @@
 #!/usr/bin/python2
-"""
-
-General Program Evaluation Script - v0.1
-
-Copyright (C) 2018 Divyanshu Kakwani <divkakwani@gmail.com>
-
-All rights reserved.
-"""
+# -*- coding: utf-8 -*-
+#
+# General Program Evaluation Script
+#
+# Copyright © Divyanshu Kakwani 2018, all rights reserved.
+#
+#
 
 from __future__ import print_function
+from pprint import pprint
 
 import os
 import sys
@@ -17,12 +17,27 @@ import argparse
 import tempfile
 import math
 import csv
+import copy
+import re
 
 
-# Global Logger
-logger = None
+# --- Config varibles ----
 
-usage_txt = """
+verbose = True
+gcc_flags = []
+gpp_flags = ['-std=c++14']
+
+
+# commands disabled during the execution of a submission
+disabled_cmds = ["g++"]
+
+
+# --- Global objects and constants ----
+cmdex = None
+
+ROLLNO_REGEX = re.compile(r"CS\d{2}B\d{3}", re.IGNORECASE)
+
+USAGE_TXT = """
 Description
 --------------
 eval.py -- Evaluates user submission(s)
@@ -38,96 +53,155 @@ Usecases
     ./eval.py --src <path of submission tar>
               --testdir <path of dir containing testcases>
               --mode s
+
 """
 
-# Custom Errors
+
+class bcolors:
+    HEADER = '\033[95m'
+    OKBLUE = '\033[94m'
+    OKGREEN = '\033[92m'
+    WARNING = '\033[93m'
+    FAIL = '\033[91m'
+    ENDC = '\033[0m'
+    BOLD = '\033[1m'
+    UNDERLINE = '\033[4m'
+
+
+
+### --- Print utility functions ----
+
+def print_error(*args):
+    sys.stderr.write(bcolors.FAIL)
+    print(*args, file=sys.stderr)
+    sys.stderr.write(bcolors.ENDC)
+
+
+def print_info_header(*args):
+    if verbose:
+        sys.stdout.write(bcolors.OKBLUE)
+        print('')
+        print(*args)
+        sys.stdout.write(bcolors.ENDC)
+
+
+def print_info(*args):
+    if verbose:
+        print(*args)
+
+
+# ---- Custom Exceptions -----
+
+class IVTarName(Exception):
+    """Raised when a submission tar is incorrectly named"""
 class ExtractError(Exception):
-    pass
-class InvalidDirStructError(Exception):
-    pass
-class MakeFileNotFoundError(Exception):
-    pass
-class InvalidMakeFileError(Exception):
-    pass
-class BuildError(Exception):
-    pass
+    """Raised when there is a problem extracting the submission tar"""
+class IVDirStruct(Exception):
+    """Raised when the submission does not have the right structure"""
+class MakeError(Exception):
+    """Raised when an error is encountered while running make on a submission"""
 class BinaryNotFound(Exception):
-    pass
+    """Raised when no executable got generated after running the make command"""
+class TestRunError(Exception):
+    """Raised when an error is encountered while running a test"""
 
 
 def load_testcases(testdir):
     """
-    Loads a list of all the valid testcases obtained from `testdir`
-    Each testcase is represented as:
-        (num, <input-file-path>, <output-file-path)
+    Loads all the testcases contained in `testdir`
+
+    Assumed Directory Structure
+    -----------------------------
+    testdir:
+        testid/
+            name.<any-extension>
+            ...
+        ...
+    Tests Representation
+    ---------------------
+    [
+        {
+            "id": <test-id>
+            <name>: <file-full-path>
+            for every name in testid/
+        }
+    ]
     """
     if not os.path.isdir(testdir):
-        logger.error("Error loading testcases: Path %s does not exist. Exiting" % testdir)
+        message = ("Error loading testcases: Path {} does " + \
+                   "not exist. Exiting").format(testdir)
+        print_error(message)
         sys.exit(-1)
-    fnames = set(os.listdir(testdir))
-    ip_fmt = 'input-%s.c'
-    op_fmt = 'output-%s.txt'
-    mx_testcases = 100
+
+    testids = set(os.listdir(testdir))
+    testids = sorted(testids)
     testcases = []
-    for num in range(mx_testcases):
-        input_file = ip_fmt % num
-        output_file = op_fmt % num
-        if input_file in fnames and output_file in fnames:
-            input_path = os.path.join(testdir, input_file)
-            output_path = os.path.join(testdir, output_file)
-            testcases.append((num, input_path, output_path))
+    for id in testids:
+        fnames = os.listdir(os.path.join(testdir, id))
+        testcase = {}
+        testcase['id'] = id
+        for fname in fnames:
+            if fname != 'id':
+                key = os.path.splitext(fname)[0]
+                testcase[key] = os.path.join(testdir, id, fname)
+        testcases.append(testcase)
+
     return testcases
 
 
 def extract_tar(tar_path, dir_path):
     """
-    Extracts the tar archive into directory referred by dir_path
-    Note:
-        1. The tar pointed by tar_path must have .tar.gz or .tar.xz extension
+    Extracts the tar archive into directory referred by dir_path.
+    The tar pointed by tar_path must have .tar.gz or .tar.xz extension
     """
-    logger.infoH("Extracting your submission")
-    logger.info("Creating directory %s to store the submission" % dir_path)
-    rc1, output1, error1 = run_cmd('mkdir -p "%s"' % dir_path)
-    if rc1 != 0:
-        logger.error(error1)
-        raise ExtractError()
-    logger.info(output1, '\n')
-    logger.info("Extracting the tar in the directory")
-    rc2, output2, error2 = run_cmd('tar -xvf "%s" -C "%s" --strip 1' % (tar_path, dir_path))
-    if rc2 != 0:
-        logger.error(error2)
-        raise ExtractError()
-    logger.info(output2, '\n')
+    print_info("Creating directory %s to store the submission" % dir_path)
+    ret, output, error = cmdex.run('mkdir -p "%s"' % dir_path)
+    if ret != 0:
+        print_error(error)
+        raise ExtractError(error)
+    print_info("Extracting the tar in the directory")
+    ret, output, error = cmdex.run('tar -xvf "%s" -C "%s" --strip 1' % (tar_path, dir_path))
+    if ret != 0:
+        print_error(error)
+        raise ExtractError(error)
 
 
 def extract_zip(zip_path, dir_path):
-    ret, output, error = run_cmd('unzip "%s" -d "%s"' % (zip_path, dir_path))
+    ret, output, error = cmdex.run('unzip "%s" -d "%s"' % (zip_path, dir_path))
     if ret != 0:
         raise ExtractError()
-    logger.info(output)
 
 
 def extract_submissions(zip_path):
     """
-    Returns a list of submissions. Each submission is represented as:
-        (<submission-name>, <roll-number>, <tar-path>)
+    Returns a list of submissions. Each submission is represented as a dict
+    with the following keys:
+        1. "rollno": roll no. in lower-case. It is picked from the tar name
+        2. "tar_path": full path where the submission tar is kept on the system
+
+    Every submission tar is expected to be named as: <rollno>.tar.gz
     """
     extract_path = tempfile.mkdtemp()
     try:
         extract_zip(zip_path, extract_path)
-    except:
-        logger.error("Error extracting submissions zip. Exiting")
+    except Exception as e:
+        print_error("Error extracting submissions' zip. Exiting")
         sys.exit(-3)
     subdirs = os.listdir(extract_path)
     submissions = []
     for subdir in subdirs:
-        name = subdir.split('_')[0]
         tars = os.listdir(os.path.join(extract_path, subdir))
         if len(tars) == 0:
             continue
         tarname = tars[0]
-        rollno = tarname.replace('.', '_').split('_')[0].upper()
-        submissions.append((name, rollno, os.path.join(extract_path, subdir, tarname)))
+        match = ROLLNO_REGEX.search(tarname)
+        if not match:
+            continue    # todo: report that the tar name is invalid
+        rollno = match.group().lower()
+        submissions.append({
+            "rollno": rollno,
+            "tarpath": os.path.join(extract_path, subdir, tarname)
+        })
     return submissions
 
 
@@ -140,42 +214,23 @@ def find_binary(dir_path):
             fpath = os.path.join(dir_path, file)
             if os.path.isfile(fpath) and os.access(fpath, os.X_OK):
                 return fpath
-
-
-def collect_args():
-    parser = argparse.ArgumentParser(description=usage_txt,
-                                     formatter_class=argparse.RawTextHelpFormatter)
-    req_named_args = parser.add_argument_group("required named arguments")
-    req_named_args.add_argument("--src", required=True,
-                                help="Path of the submission tar")
-    req_named_args.add_argument("--testdir", required=True,
-                                help="Path of the directory that contains the test case files")
-    req_named_args.add_argument("--mode", required=True,
-                                help="Batch or single mode. Use 'b' for batch and 's' for single")
-    parser.add_argument("--penalty", help="Penalize submission for incorrect format, late submission etc")
-    parser.add_argument("--extractdir", help="Directory where the source code will be extracted to")
-    parser.add_argument("-f", "--format", help="Output format. eg csv, json etc")
-    parser.add_argument("-v", "--verbose", action="store_true", default=False, help="Set verbose on/off")
-    parser.add_argument("-s", "--summary", action="store_true", default=False, help="Also display statistical summary of all the results")
-    args = vars(parser.parse_args())
-    if not args['extractdir']:
-        args['extractdir'] = tempfile.mkdtemp()
-    return args
+    raise BinaryNotFound
 
 
 def build_subm(subm_path):
     cwd = os.getcwd()
     os.chdir(subm_path)
-    logger.infoH("Building the submission")
-    retcode, output, error = run_cmd("make")
+    print_info("Cleaning any existing build")
+    retcode, output, error = cmdex.run("make clean")
+    print_info("Running make")
+    retcode, output, error = cmdex.run("make")
     os.chdir(cwd)
     if retcode != 0:
-        logger.error(error)
+        print_error(error)
         raise BuildError()
-    logger.info(output, '\n')
 
 
-class SubmEvaluator:
+class Evaluator:
 
     def __init__(self, extractdir, testcases):
         self.test_runner = TestRunner(testcases)
@@ -183,46 +238,39 @@ class SubmEvaluator:
 
     def evaluate(self, subm):
         """
-        Returns evaluation result
+        Evaluates a submission
         """
         result = {
-            "submission": subm,
-            "extract_status": None,
-            "build_status": None,
-            "tc_results": {
-                "tests": [],
-                "total": 0,
-                "passed": 0,
-                "failed": 0,
-            },
+            "subm_id": subm["rollno"],
+            "error_obj": None,
+            "nb_tests": None,
+            "passed": None,
+            "failed": None,
+            "tsumm": [],
             "score": None,
-            "binary_exists": None,
         }
-        subm_path = os.path.join(self.extractdir, subm[0])
+        subm_path = os.path.join(self.extractdir, subm["rollno"])
         try:
-            extract_tar(subm[2], subm_path)
-            result["extract_status"] = "Passed"
+            print_info_header("Extracting submission...")
+            extract_tar(subm["tarpath"], subm_path)
+            print_info_header("Building submission...")
             build_subm(subm_path)
-            result["build_status"] = "Passed"
             bin_path = find_binary(subm_path)
-            if not bin_path:
-                raise BinaryNotFound
-            result["binary_exists"] = "Passed"
-            result["tc_results"] = self.test_runner.run(bin_path, subm_path)
-        except ExtractError:
-            result["extract_status"] = "Failed"
-        except BuildError:
-            result["build_status"] = "Failed"
-        except BinaryNotFound:
-            result["binary_exists"] = "Failed"
-        result["score"] = score_subm(result["tc_results"])
+            print_info_header("Running Testcases")
+            tsumm = self.test_runner.run(bin_path, subm_path)
+            result["nb_tests"] = len(tsumm)
+            result["failed"] = len([1 for _, status in tsumm if not status])
+            result["passed"] = result["nb_tests"] - result["failed"]
+            result["tsumm"] = tsumm
+            result["score"] = score_subm(result["tsumm"])
+        except Exception as e:
+            result["error_obj"] = e
         return result
 
 
-
-def score_subm(test_results):
+def score_subm(tsumm):
     score = 0
-    for (id, status) in test_results["tests"]:
+    for (id, status) in tsumm:
         if status:
             score += 0.5
     return score
@@ -239,12 +287,7 @@ class TestRunner:
         @param subm_path Full path of the submission directory. This directory
                          is also where the generated files are stored.
         """
-        result = {
-            "tests": [],
-            "total": 0,
-            "passed": 0,
-            "failed": 0
-        }
+        tsumm = []
         asfile_path = os.path.join(subm_path, 'assembly.s')
         exefile_path = os.path.join(subm_path, 'generated.out')
         # Run binary passing the testcase input and store the generated assembly
@@ -254,190 +297,181 @@ class TestRunner:
         # compare the output of the executable with the testcase output
         cmd3t = '"%s" | diff "%%s" - || :' % (exefile_path)
 
-        logger.infoH("Running Testcases")
-        for (num, ipath, opath) in self.testcases:
-            result["total"] += 1
-            logger.info("Running testcase #", num)
-            cmd1 = cmd1t % ipath
-            cmd3 = cmd3t % opath
-            retcode, output, errormsg = chain_cmd(cmd1, cmd2, cmd3)
+        for test in self.testcases:
+            print_info("\nRunning testcase #", test["id"])
+            cmd1 = cmd1t % test["input"]
+            cmd3 = cmd3t % test["output"]
+            retcode, output, errormsg = cmdex.run(cmd1, cmd2, cmd3)
             if retcode != 0 or output is None or len(output.strip()) > 0:
                 matches = False
             else:
                 matches = True
-            if matches:
-                result["passed"] += 1
-                result["tests"].append((num, True))
-            else:
-                result["failed"] += 1
-                result["tests"].append((num, False))
-            logger.info("Status: ", ("Passed" if matches else "Failed"))
+            tsumm.append((test["id"], matches))
+            print_info("Status: ", ("Passed" if matches else "Failed"))
             if not matches and output is not None:
-                logger.info("Diff with the output:")
-                logger.info(output)
+                print_info("Diff with the output:")
+                print_info(output)
 
-        return result
-
-
-class Logger:
-
-    class bcolors:
-        HEADER = '\033[95m'
-        OKBLUE = '\033[94m'
-        OKGREEN = '\033[92m'
-        WARNING = '\033[93m'
-        FAIL = '\033[91m'
-        ENDC = '\033[0m'
-        BOLD = '\033[1m'
-        UNDERLINE = '\033[4m'
-
-    def __init__(self):
-        self.enabled = False
-
-    def enable(self):
-        self.enabled = True
-
-    def infoH(self, *args):
-        if self.enabled:
-            sys.stdout.write(Logger.bcolors.OKBLUE)
-            print(*args)
-            sys.stdout.write(Logger.bcolors.ENDC)
-
-    def info(self, *args):
-        if self.enabled:
-            print(*args)
-
-    def error(self, *args):
-        sys.stderr.write(Logger.bcolors.FAIL)
-        print(*args, file=sys.stderr)
-        sys.stderr.write(Logger.bcolors.ENDC)
+        return tsumm
 
 
-class Results:
-
-    def __init__(self):
-        self.results = []
-
-    def add(self, result):
-        self.results.append(result)
-
-    def summarize(self):
-        marks = [result["score"] for result in self.results]
-        stats = {
-            "Mean": (sum(marks) * 1.0) / len(marks),
-            "Highest": max(marks),
-            "Lowest": min(marks),
-        }
-        stats["Stddev"] = math.sqrt(sum((x - stats["Mean"])**2 for x in marks))
-        for k in stats:
-            print("{} = {}".format(k, stats[k]))
-
-    def _error_str(self, result):
-        if result["extract_status"] == "Failed":
-            return "Error extracting the submission"
-        elif result["build_status"] == "Failed":
-            return "Error building the submission"
-        elif result["binary_exists"] == "Failed":
-            return "Error finding a.out"
-        else:
-            return "-"
-
-    def print(self, format):
-        if format == 'csv':
-            self.csv()
-        else:
-            self.tabular()
-
-    def tabular(self):
-        print('------------ Evaluation Report --------------------')
-        th_pattern = "{0: <30.25}\t{1: <15}\t{2: <15}\t{3: <15}"
-        tr_pattern = "{0: <30.25}\t{1: <15}\t{2: <15}\t{3: <15}"
-        print(th_pattern.format("Student ID", "Error(s)", "TCs Passed", "Marks"))
-        for result in self.results:
-            tcs_passed = "{} / {}".format(result["tc_results"]["passed"],
-                                          result["tc_results"]["total"])
-            print(tr_pattern.format(result["submission"][0],
-                                    self._error_str(result),
-                                    tcs_passed,
-                                    result["score"]))
-        print('')
-
-    def _make_comment(self, result):
-        err_str = self._error_str(result)
-        comment = err_str
-        if err_str == '-':
-            failed_tcs = ','.join(str(num)
-                                  for num, status
-                                  in
-                                  result["tc_results"]["tests"]
-                                  if not status)
-            if len(failed_tcs) == 0:
-                comment = ""
-            else:
-                comment = "Failed Testcases: " + failed_tcs
-        return comment
-
-    def csv(self):
-        header = ["roll_no", "marks", "comments"]
-        payload = [[result["submission"][1],
-                    result["score"],
-                    self._make_comment(result)]
-                   for result in self.results]
-        csvwriter = csv.writer(sys.stdout)
-        csvwriter.writerow(header)
-        csvwriter.writerows(payload)
+### ------- Functions to print/dump results -----
 
 
-def chain_cmd(*cmds):
-    r, o, e = None, None, None
-    for cmd in cmds:
-        r, o, e = run_cmd(cmd)
-        if r != 0:
-            return r, o, e
-    return r, o, e
+def make_comment(result):
+    errobj = result['error_obj']
+    if errobj is not None:
+        if isinstance(errobj, IVTarName):
+            return 'Invalid Tar Name'
+        elif isinstace(errobj, ExtractError):
+            return 'Error extracting the submission'
+        elif isinstace(errobj, IVDirStruct):
+            return 'Invalid directory structure'
+        elif isinstace(errobj, MakeError):
+            return 'Error encountered while running make'
+        elif isinstace(errobj, BinaryNotFound):
+            return 'Couldn\'t found executable'
+        elif isinstace(errobj, TestRunError):
+            return 'Error running test cases'
+    if result['nb_tests'] > result['passed']:
+        return 'Failed Testcases: ' + ', '.join(id
+                                                for id, status in result['tsumm']
+                                                if not status)
+    return ''
+
+def dump_csv(results, filename=None):
+    fp = open(filename or sys.stdout, "w+") if filename else sys.stdout
+    header = ["roll_no", "marks", "comments"]
+    payload = [[result['subm_id'],
+                result["score"],
+                make_comment(result)]
+               for result in results]
+    csvwriter = csv.writer(fp)
+    csvwriter.writerow(header)
+    csvwriter.writerows(payload)
+    if filename:
+        fp.close()
 
 
-def run_cmd(cmdstr):
+def print_results(results, filename=None):
+    fp = open(filename or sys.stdout, "w+") if filename else sys.stdout
+    fp.write('\nEvaluation Report: \n')
+    fp.write('===================================== \n\n')
+    th_pattern = "{0: <15}\t{1: <15}\t{2: <15}\t{3: <15}\n"
+    tr_pattern = "{0: <15}\t{1: <15}\t{2: <15}\t{3: <15}\n"
+    fp.write(th_pattern.format("Roll No.", "TCs Passed",
+                               "Score", "Comment"))
+    for result in results:
+        tcs_passed = "{} / {}".format(result["passed"], result["nb_tests"])
+        fp.write(tr_pattern.format(result["subm_id"], tcs_passed,
+                                   result["score"], make_comment(result)))
+    if filename:
+        fp.close()
+
+def print_summary(results, filename=None):
+    fp = open(filename or sys.stdout, "w+") if filename else sys.stdout
+    scores = [result["score"] for result in results]
+    stats = {
+        "Mean": (sum(scores) * 1.0) / len(scores),
+        "Highest": max(scores),
+        "Lowest": min(scores),
+    }
+    stats["Stddev"] = math.sqrt(sum((x - stats["Mean"])**2 for x in scores))
+    for k in stats:
+        fp.write("{} = {}\n".format(k, stats[k]))
+    if filename:
+        fp.close()
+
+
+
+class CommandExecutor:
     """
-    Returns:
-        (Return Code, contents of stdout, contents of stderr)
+    Interface to run system commands
     """
-    retcode = 0
-    output = None
-    errormsg = None
-    cmd = '/bin/bash -o pipefail -c \'%s\'' % cmdstr
-    logger.info("Running command: ", cmdstr)
-    try:
-        output = subprocess.check_output(cmd, stderr=subprocess.STDOUT, shell=True)
-    except subprocess.CalledProcessError as err:
-        errormsg = err.output
-        retcode = err.returncode
+    def __init__(self):
+        self.gcc_fn = 'gcc() { /usr/bin/gcc ' + ' '.join(gcc_flags) + ' "$@"; };'
+        self.gpp_fn = 'g++() { /usr/bin/g++ ' + ' '.join(gpp_flags) + ' "$@"; };'
+        self.disabled_cmds = ' '.join('%s(){ :; }; ' % cmd
+                                      for cmd in disabled_cmds)
 
-    return (retcode, output, errormsg)
+    def _run_bash(self, cmd, disable=False):
+        # print_info(cmd)
+        ret, out, errstr = 0, None, None
+        prefix = self.gcc_fn + self.gpp_fn + \
+                    (self.disabled_cmds if disable else '')
+        ## FIXME: disable cmds will not work
+        cmd = '/bin/bash -o pipefail -c \'{} {}\''.format(prefix, cmd)
+        try:
+            out = subprocess.check_output(cmd, stderr=subprocess.STDOUT,
+                                          shell=True)
+        except subprocess.CalledProcessError as err:
+            errstr = err.output
+            ret = err.returncode
+        return (ret, out, errstr)
 
+    def run(self, *cmds, **options):
+        disable_cmds = options.get('disable_cmds', False)
+        ret, out, err = None, None, None
+        for cmd in cmds:
+            ret, out, err = self._run_bash(cmd, disable_cmds)
+            if ret != 0:
+                return ret, out, err
+        return ret, out, err
+
+
+def collect_args():
+    parser = argparse.ArgumentParser(description=USAGE_TXT,
+                                     formatter_class=argparse.RawTextHelpFormatter)
+    req_named_args = parser.add_argument_group("required named arguments")
+    req_named_args.add_argument("--src", required=True,
+                                help="Path of the submission tar")
+    req_named_args.add_argument("--testdir", required=True,
+                                help="Path of the directory that contains the test case files")
+    req_named_args.add_argument("--mode", required=True,
+                                help="Batch or single mode. Use 'b' for batch and 's' for single")
+    parser.add_argument("--penalty", help="Penalize submission for incorrect format, late submission etc")
+    parser.add_argument("--extractdir", help="Directory where the source code will be extracted to")
+    parser.add_argument("--dump-csv", help="Dump a csv of the result")
+    parser.add_argument("-v", "--verbose", action="store_true",
+                        default=False, help="Set verbose on/off")
+    parser.add_argument("-s", "--summary", action="store_true", default=False,
+                        help="Also display statistical summary of all the results")
+    args = vars(parser.parse_args())
+    if not args['extractdir']:
+        args['extractdir'] = tempfile.mkdtemp()
+
+    if args['verbose']:
+        global verbose
+        verbose = True
+
+    return args
+
+
+def init():
+    global cmdex
+    cmdex = CommandExecutor()
 
 def main():
-    global logger
-    logger = Logger()
+    init()
     args = collect_args()
     testcases = load_testcases(args["testdir"])
-    if args["verbose"]:
-        logger.enable()
     if args["mode"] == "b":
         submissions = extract_submissions(args["src"])
     else:
-        name = os.path.basename(args["src"]).split('.')[0]
-        submissions = [(name, name, args["src"])]
-    evaluator = SubmEvaluator(args["extractdir"], testcases)
-    results = Results()
+        match = ROLLNO_REGEX.search(os.path.basename(args["src"]))
+        if not match:
+            print_error("Invalid tar name")
+            exit(-5)
+        rollno = match.group().lower()
+        submissions = [{"rollno": rollno, "tarpath": args["src"]}]
+    evaluator = Evaluator(args["extractdir"], testcases)
+    results = []
     for subm in submissions:
-        logger.infoH("Evaluating submission: %s\n" % subm[0])
+        print_info_header("Evaluating submission: %s" % subm["rollno"])
         result = evaluator.evaluate(subm)
-        results.add(result)
-    results.print(args["format"])
+        results.append(result)
 
-    if args["summary"]:
-        results.summarize()
+    print_results(results)
 
 
 if __name__ == '__main__':
