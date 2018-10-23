@@ -227,7 +227,7 @@ def build_subm(subm_path):
     os.chdir(cwd)
     if retcode != 0:
         print_error(error)
-        raise BuildError()
+        raise MakeError()
 
 
 class Evaluator:
@@ -323,21 +323,22 @@ def make_comment(result):
     if errobj is not None:
         if isinstance(errobj, IVTarName):
             return 'Invalid Tar Name'
-        elif isinstace(errobj, ExtractError):
+        elif isinstance(errobj, ExtractError):
             return 'Error extracting the submission'
-        elif isinstace(errobj, IVDirStruct):
+        elif isinstance(errobj, IVDirStruct):
             return 'Invalid directory structure'
-        elif isinstace(errobj, MakeError):
+        elif isinstance(errobj, MakeError):
             return 'Error encountered while running make'
-        elif isinstace(errobj, BinaryNotFound):
-            return 'Couldn\'t found executable'
-        elif isinstace(errobj, TestRunError):
+        elif isinstance(errobj, BinaryNotFound):
+            return 'Couldn\'t find executable'
+        elif isinstance(errobj, TestRunError):
             return 'Error running test cases'
     if result['nb_tests'] > result['passed']:
-        return 'Failed Testcases: ' + ', '.join(id
-                                                for id, status in result['tsumm']
-                                                if not status)
+        return 'Failed Testcases: ' + \
+                ', '.join(id for id, status in result['tsumm']
+                          if not status)
     return ''
+
 
 def dump_csv(results, filename=None):
     fp = open(filename or sys.stdout, "w+") if filename else sys.stdout
@@ -355,8 +356,8 @@ def dump_csv(results, filename=None):
 
 def print_results(results, filename=None):
     fp = open(filename or sys.stdout, "w+") if filename else sys.stdout
-    fp.write('\nEvaluation Report: \n')
-    fp.write('===================================== \n\n')
+    fp.write('\n\nEvaluation Report: \n')
+    fp.write('===================================== \n')
     th_pattern = "{0: <15}\t{1: <15}\t{2: <15}\t{3: <15}\n"
     tr_pattern = "{0: <15}\t{1: <15}\t{2: <15}\t{3: <15}\n"
     fp.write(th_pattern.format("Roll No.", "TCs Passed",
@@ -368,6 +369,7 @@ def print_results(results, filename=None):
     if filename:
         fp.close()
 
+
 def print_summary(results, filename=None):
     fp = open(filename or sys.stdout, "w+") if filename else sys.stdout
     scores = [result["score"] for result in results]
@@ -377,6 +379,8 @@ def print_summary(results, filename=None):
         "Lowest": min(scores),
     }
     stats["Stddev"] = math.sqrt(sum((x - stats["Mean"])**2 for x in scores))
+    fp.write('\n\nEvaluation Statistics: \n')
+    fp.write('===================================== \n')
     for k in stats:
         fp.write("{} = {}\n".format(k, stats[k]))
     if filename:
@@ -451,6 +455,7 @@ def init():
     global cmdex
     cmdex = CommandExecutor()
 
+
 def main():
     init()
     args = collect_args()
@@ -459,9 +464,9 @@ def main():
         submissions = extract_submissions(args["src"])
     else:
         match = ROLLNO_REGEX.search(os.path.basename(args["src"]))
-        if not match:
-            print_error("Invalid tar name")
-            exit(-5)
+        if not match or not os.path.exists(args["src"]):
+            print_error("Invalid tar name or the tar does not exist")
+            sys.exit(-5)
         rollno = match.group().lower()
         submissions = [{"rollno": rollno, "tarpath": args["src"]}]
     evaluator = Evaluator(args["extractdir"], testcases)
@@ -472,6 +477,12 @@ def main():
         results.append(result)
 
     print_results(results)
+
+    if args["dump_csv"]:
+        dump_csv(results, args["dump_csv"])
+
+    if args["summary"]:
+        print_summary(results)
 
 
 if __name__ == '__main__':
