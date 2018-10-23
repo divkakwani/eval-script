@@ -222,6 +222,8 @@ def build_subm(subm_path):
     os.chdir(subm_path)
     print_info("Cleaning any existing build")
     retcode, output, error = cmdex.run("make clean")
+    print_info("Removing a.out manually if it still exists")
+    retcode, output, error = cmdex.run("rm a.out")
     print_info("Running make")
     retcode, output, error = cmdex.run("make")
     os.chdir(cwd)
@@ -289,28 +291,37 @@ class TestRunner:
         """
         tsumm = []
         asfile_path = os.path.join(subm_path, 'assembly.s')
+        smfile_path = os.path.join(subm_path, 'summary.txt')
         exefile_path = os.path.join(subm_path, 'generated.out')
-        # Run binary passing the testcase input and store the generated assembly
-        cmd1t = '"%s" < "%%s" > "%s"' % (bin_path, asfile_path)
+        os.chdir(subm_path)
+        # Run binary passing the input source
+        cmd1t = '"%s" < "%%s"' % bin_path
         # Compile the generated assembly into executable
         cmd2 = 'gcc -o "%s" "%s"' % (exefile_path, asfile_path)
         # compare the output of the executable with the testcase output
-        cmd3t = '"%s" | diff "%%s" - || :' % (exefile_path)
+        cmd3t = '"%s" < "%%s" | diff "%%s" - || :' % (exefile_path)
+        cmd4t = 'diff "%%s" "%s" || :' % smfile_path
 
         for test in self.testcases:
             print_info("\nRunning testcase #", test["id"])
-            cmd1 = cmd1t % test["input"]
-            cmd3 = cmd3t % test["output"]
-            retcode, output, errormsg = cmdex.run(cmd1, cmd2, cmd3)
-            if retcode != 0 or output is None or len(output.strip()) > 0:
-                matches = False
+            cmd1 = cmd1t % test["source"]
+            cmd3 = cmd3t % (test["input"], test["output"])
+            cmd4 = cmd4t % test["summary"]
+            ret, out, err = cmdex.run(cmd1, cmd2, cmd3)
+            ret1, out1, err1 = cmdex.run(cmd4)
+            if ret != 0 or ret1 != 0 or out is None or out1 is None or \
+               len(out) > 0 or len(out1) > 0:
+                success = False
             else:
-                matches = True
-            tsumm.append((test["id"], matches))
-            print_info("Status: ", ("Passed" if matches else "Failed"))
-            if not matches and output is not None:
-                print_info("Diff with the output:")
-                print_info(output)
+                success = True
+            tsumm.append((test["id"], success))
+            print_info("Status: ", ("Passed" if success else "Failed"))
+            if out and len(out.strip()) > 0:
+                print_info("\nDifference in the output of the program:")
+                print_info(out)
+            if out1 and len(out1.strip()) > 0:
+                print_info("\nDifference in the summary file:")
+                print_info(out1)
 
         return tsumm
 
@@ -333,6 +344,8 @@ def make_comment(result):
             return 'Couldn\'t find executable'
         elif isinstance(errobj, TestRunError):
             return 'Error running test cases'
+        else:
+            return "Internal script error: " + str(errobj)
     if result['nb_tests'] > result['passed']:
         return 'Failed Testcases: ' + \
                 ', '.join(id for id, status in result['tsumm']
@@ -447,6 +460,15 @@ def collect_args():
     if args['verbose']:
         global verbose
         verbose = True
+
+    args['src'] = os.path.abspath(args['src'])
+    args['testdir'] = os.path.abspath(args['testdir'])
+
+    if 'extractdir' in args:
+        args['extractdir'] = os.path.abspath(args['extractdir'])
+
+    if 'dump-csv' in args:
+        args['dump-csv'] = os.path.abspath(args['dump-csv'])
 
     return args
 
