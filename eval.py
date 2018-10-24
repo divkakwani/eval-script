@@ -299,8 +299,8 @@ class TestRunner:
         # Compile the generated assembly into executable
         cmd2 = 'gcc -o "%s" "%s"' % (exefile_path, asfile_path)
         # compare the output of the executable with the testcase output
-        cmd3t = '"%s" < "%%s" | diff "%%s" - || :' % (exefile_path)
-        cmd4t = 'diff "%%s" "%s" || :' % smfile_path
+        cmd3t = '"%s" < "%%s" | diff -bB "%%s" - || :' % (exefile_path)
+        cmd4t = 'diff -bB "%%s" "%s" || :' % smfile_path
 
         for test in self.testcases:
             print_info("\nRunning testcase #", test["id"])
